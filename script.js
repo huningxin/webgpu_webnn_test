@@ -1,6 +1,60 @@
 import glslangModule from 'https://unpkg.com/@webgpu/glslang/web/glslang.js';
 
+const nn = navigator.ml.getNeuralNetworkContext();
+const TENSOR_DIMS = [2, 2];
+const TENSOR_SIZE = 4;
+
+async function createNNModel() {
+  let operandIndex = 0;
+  const TENSOR_DATA = [1, 1, 1, 1];
+  const float32TensorType = {type: nn.TENSOR_FLOAT32, dimensions: TENSOR_DIMS};
+  const scalarInt32Type = {type: nn.INT32};
+
+  const model = await nn.createModel();
+
+  const fusedActivationFuncNone = operandIndex++;
+  model.addOperand(scalarInt32Type);
+  model.setOperandValue(fusedActivationFuncNone, new Int32Array([nn.FUSED_NONE]));
+
+  const constant = operandIndex++;
+  model.addOperand(float32TensorType);
+  model.setOperandValue(constant, new Float32Array(TENSOR_DATA));
+
+  const input = operandIndex++;
+  model.addOperand(float32TensorType);
+
+  const output = operandIndex++;
+  model.addOperand(float32TensorType);
+
+  model.addOperation(nn.ADD, [input, constant, fusedActivationFuncNone], [output]);
+
+  model.identifyInputsAndOutputs([input], [output]);
+  await model.finish();
+
+  return model;
+}
+
 (async () => {
+  
+  const model = await createNNModel();
+  const compilation = await model.createCompilation();
+  compilation.setPreference(nn.PREFER_SUSTAINED_SPEED);
+  await compilation.finish();
+
+  let execution = await compilation.createExecution();
+  let inputTensor = new Float32Array(TENSOR_SIZE);
+  inputTensor.fill(1);
+
+  execution.setInput(0, inputTensor);
+
+  let outputTensor = new Float32Array(TENSOR_SIZE);
+  execution.setOutput(0, outputTensor);
+
+  let error = await execution.startCompute();
+  console.log(error);
+
+  console.log(outputTensor);
+
   if (!navigator.gpu) {
     console.log("WebGPU is not supported. Enable chrome://flags/#enable-unsafe-webgpu flag.");
     return;
