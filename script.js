@@ -65,8 +65,9 @@ async function createNNModel() {
 
   // First Matrix
 
+  const rows = 2;
+  const columns = 4;
   const firstMatrix = new Float32Array([
-    2 /* rows */, 4 /* columns */,
     1, 2, 3, 4,
     5, 6, 7, 8
   ]);
@@ -82,7 +83,6 @@ async function createNNModel() {
   // Second Matrix
 
   const secondMatrix = new Float32Array([
-    4 /* rows */, 2 /* columns */,
     1, 2,
     3, 4,
     5, 6,
@@ -99,12 +99,22 @@ async function createNNModel() {
   
   // Result Matrix
 
-  const resultMatrixBufferSize = Float32Array.BYTES_PER_ELEMENT * (2 + firstMatrix[0] * secondMatrix[1]);
+  const resultMatrixBufferSize = Float32Array.BYTES_PER_ELEMENT * (rows * rows);
   const resultMatrixBuffer = device.createBuffer({
     size: resultMatrixBufferSize,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
   });
 
+  // Shape Matrix
+
+  const shape = new Float32Array([rows, columns]);
+
+  const [gpuBufferShape, arrayBufferShape] = await device.createBufferMappedAsync({
+    size: shape.byteLength,
+    usage: GPUBufferUsage.STORAGE
+  });
+  new Float32Array(arrayBufferShape).set(shape);
+  gpuBufferShape.unmap();
 
   // Bind group layout and bind group
 
@@ -122,6 +132,11 @@ async function createNNModel() {
       },
       {
         binding: 2,
+        visibility: GPUShaderStage.COMPUTE,
+        type: "storage-buffer"
+      },
+      {
+        binding: 3,
         visibility: GPUShaderStage.COMPUTE,
         type: "storage-buffer"
       }
@@ -149,6 +164,12 @@ async function createNNModel() {
         resource: {
           buffer: resultMatrixBuffer
         }
+      },
+      {
+        binding: 3,
+        resource: {
+          buffer: gpuBufferShape
+        }
       }
     ]
   });
@@ -159,32 +180,31 @@ async function createNNModel() {
   const computeShaderCode = `#version 450
 
   layout(std430, set = 0, binding = 0) readonly buffer FirstMatrix {
-      vec2 size;
       float numbers[];
   } firstMatrix;
 
   layout(std430, set = 0, binding = 1) readonly buffer SecondMatrix {
-      vec2 size;
       float numbers[];
   } secondMatrix;
 
   layout(std430, set = 0, binding = 2) buffer ResultMatrix {
-      vec2 size;
       float numbers[];
   } resultMatrix;
 
-  void main() {
-    resultMatrix.size = vec2(firstMatrix.size.x, secondMatrix.size.y);
+  layout(std430, set = 0, binding = 3) buffer Shape {
+    vec2 size;
+  } shape;
 
+  void main() {
     ivec2 resultCell = ivec2(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y);
     float result = 0.0;
-    for (int i = 0; i < firstMatrix.size.y; i++) {
-      int a = i + resultCell.x * int(firstMatrix.size.y);
-      int b = resultCell.y + i * int(secondMatrix.size.y);
+    for (int i = 0; i < shape.size.y; i++) {
+      int a = i + resultCell.x * int(shape.size.y);
+      int b = resultCell.y + i * int(shape.size.x);
       result += firstMatrix.numbers[a] * secondMatrix.numbers[b];
     }
 
-    int index = resultCell.y + resultCell.x * int(secondMatrix.size.y);
+    int index = resultCell.y + resultCell.x * int(shape.size.x);
     resultMatrix.numbers[index] = result;
   }
   `;
@@ -215,7 +235,7 @@ async function createNNModel() {
   const passEncoder = commandEncoder.beginComputePass();
   passEncoder.setPipeline(computePipeline);
   passEncoder.setBindGroup(0, bindGroup);
-  passEncoder.dispatch(firstMatrix[0] /* x */, secondMatrix[1] /* y */);
+  passEncoder.dispatch(shape[0], shape[0]);
   passEncoder.endPass();
 
   // Get a GPU buffer for reading in an unmapped state.
