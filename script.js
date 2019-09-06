@@ -1,10 +1,11 @@
 import glslangModule from 'https://unpkg.com/@webgpu/glslang/web/glslang.js';
 
-const nn = navigator.ml.getNeuralNetworkContext();
 const TENSOR_DIMS = [2, 2];
 const TENSOR_SIZE = 4;
 
-async function createNNModel() {
+async function createAndCompileNNGraph(device) {
+  const nn = navigator.ml.getNeuralNetworkContext();
+
   let operandIndex = 0;
   const TENSOR_DATA = [1, 1, 1, 1];
   const float32TensorType = {type: nn.TENSOR_FLOAT32, dimensions: TENSOR_DIMS};
@@ -31,30 +32,185 @@ async function createNNModel() {
   model.identifyInputsAndOutputs([input], [output]);
   await model.finish();
 
-  return model;
-}
-
-(async () => {
-  
-  // Create nn graph
-  const model = await createNNModel();
-
-  if (!navigator.gpu) {
-    console.log("WebGPU is not supported. Enable chrome://flags/#enable-unsafe-webgpu flag.");
-    return;
-  }
-
-  const adapter = await navigator.gpu.requestAdapter();
-  const device = await adapter.requestDevice();
-
-  // Compile nn graph
   const compilation = await model.createCompilation();
   compilation.setGPUDevice(device);
   compilation.setPreference(nn.PREFER_SUSTAINED_SPEED);
   await compilation.finish();
+  return await compilation.createExecution();
+}
 
+async function runMatrixAddByWebGPU(device, gpuBufferSecondMatrix) {
   // First Matrix
+  const firstMatrix = new Float32Array([1, 2, 3, 4]);
 
+  const [gpuBufferFirstMatrix, arrayBufferFirstMatrix] = await device.createBufferMappedAsync({
+    size: firstMatrix.byteLength,
+    usage: GPUBufferUsage.STORAGE
+  });
+  new Float32Array(arrayBufferFirstMatrix).set(firstMatrix);
+  gpuBufferFirstMatrix.unmap();
+
+  
+  // Result Matrix
+
+  const resultMatrixBufferSize = Float32Array.BYTES_PER_ELEMENT * (TENSOR_SIZE);
+  const resultMatrixBuffer = device.createBuffer({
+    size: resultMatrixBufferSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+
+  // Shape Matrix
+
+  const shape = new Float32Array(TENSOR_DIMS);
+
+  const [gpuBufferShape, arrayBufferShape] = await device.createBufferMappedAsync({
+    size: shape.byteLength,
+    usage: GPUBufferUsage.STORAGE
+  });
+  new Float32Array(arrayBufferShape).set(shape);
+  gpuBufferShape.unmap();
+
+  // Bind group layout and bind group
+
+  const bindGroupLayout = device.createBindGroupLayout({
+    bindings: [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.COMPUTE,
+        type: "storage-buffer"
+      },
+      {
+        binding: 1,
+        visibility: GPUShaderStage.COMPUTE,
+        type: "storage-buffer"
+      },
+      {
+        binding: 2,
+        visibility: GPUShaderStage.COMPUTE,
+        type: "storage-buffer"
+      },
+      {
+        binding: 3,
+        visibility: GPUShaderStage.COMPUTE,
+        type: "storage-buffer"
+      }
+    ]
+  });
+
+
+  const bindGroup = device.createBindGroup({
+    layout: bindGroupLayout,
+    bindings: [
+      {
+        binding: 0,
+        resource: {
+          buffer: gpuBufferFirstMatrix
+        }
+      },
+      {
+        binding: 1,
+        resource: {
+          buffer: gpuBufferSecondMatrix
+        }
+      },
+      {
+        binding: 2,
+        resource: {
+          buffer: resultMatrixBuffer
+        }
+      },
+      {
+        binding: 3,
+        resource: {
+          buffer: gpuBufferShape
+        }
+      }
+    ]
+  });
+  
+
+  // Compute shader code (GLSL)
+
+  const computeShaderCode = `#version 450
+
+  layout(std430, set = 0, binding = 0) readonly buffer FirstMatrix {
+      float numbers[];
+  } firstMatrix;
+
+  layout(std430, set = 0, binding = 1) readonly buffer SecondMatrix {
+      float numbers[];
+  } secondMatrix;
+
+  layout(std430, set = 0, binding = 2) buffer ResultMatrix {
+      float numbers[];
+  } resultMatrix;
+
+  layout(std430, set = 0, binding = 3) buffer Shape {
+    vec2 size;
+  } shape;
+
+  void main() {
+    uint index = gl_GlobalInvocationID.y + gl_GlobalInvocationID.x * int(shape.size.x);
+    resultMatrix.numbers[index] = firstMatrix.numbers[index] + secondMatrix.numbers[index];
+  }
+  `;
+
+
+
+  // Pipeline setup
+
+  const glslang = await glslangModule();
+  
+  const computePipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({
+      bindGroupLayouts: [bindGroupLayout]
+    }),
+    computeStage: {
+      module: device.createShaderModule({
+        code: glslang.compileGLSL(computeShaderCode, "compute")
+      }),
+      entryPoint: "main"
+    }
+  });
+
+
+  // Commands submission
+
+  const commandEncoder = device.createCommandEncoder();
+
+  const passEncoder = commandEncoder.beginComputePass();
+  passEncoder.setPipeline(computePipeline);
+  passEncoder.setBindGroup(0, bindGroup);
+  passEncoder.dispatch(shape[0], shape[0]);
+  passEncoder.endPass();
+
+  // Get a GPU buffer for reading in an unmapped state.
+  const gpuReadBuffer = device.createBuffer({
+    size: resultMatrixBufferSize,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+  });
+
+  // Encode commands for copying buffer to buffer.
+  commandEncoder.copyBufferToBuffer(
+    resultMatrixBuffer /* source buffer */,
+    0 /* source offset */,
+    gpuReadBuffer /* destination buffer */,
+    0 /* destination offset */,
+    resultMatrixBufferSize /* size */
+  );
+
+  // Submit GPU commands.
+  const gpuCommands = commandEncoder.finish();
+  device.getQueue().submit([gpuCommands]);
+
+
+  // Read buffer.
+  const arrayBuffer = await gpuReadBuffer.mapReadAsync();
+  console.log(new Float32Array(arrayBuffer));
+}
+
+async function runMatrixMultiplyByWebGPU(device) {
+  // First Matrix
   const rows = 2;
   const columns = 4;
   const firstMatrix = new Float32Array([
@@ -88,7 +244,6 @@ async function createNNModel() {
 
   
   // Result Matrix
-
   const resultMatrixBufferSize = Float32Array.BYTES_PER_ELEMENT * (rows * rows);
   const resultMatrixBuffer = device.createBuffer({
     size: resultMatrixBufferSize,
@@ -252,22 +407,50 @@ async function createNNModel() {
   const arrayBuffer = await gpuReadBuffer.mapReadAsync();
   console.log(new Float32Array(arrayBuffer));
 
-  // Execute nn graph
-  let execution = await compilation.createExecution();
+  return resultMatrixBuffer;
+}
+
+(async () => {
+  
+  if (!navigator.gpu) {
+    console.log("WebGPU is not supported. Enable chrome://flags/#enable-unsafe-webgpu flag.");
+    return;
+  }
+
+  const adapter = await navigator.gpu.requestAdapter();
+  const device = await adapter.requestDevice();
+
+  // Create nn graph
+  const execution = await createAndCompileNNGraph(device);
+
+  const gpuBufferSecondMatrixSize = Float32Array.BYTES_PER_ELEMENT * (TENSOR_SIZE);
+  const gpuBufferSecondMatrix = device.createBuffer({
+    size: gpuBufferSecondMatrixSize,
+    usage: GPUBufferUsage.STORAGE
+  });
+
+  const resultMatrixBuffer = await runMatrixMultiplyByWebGPU(device);
 
   // Use CPU buffer as input
-  // let inputTensor = new Float32Array(TENSOR_SIZE);
-  // inputTensor.fill(1);
+  //let inputTensor = new Float32Array(TENSOR_SIZE);
+  //inputTensor.fill(1);
   // execution.setInput(0, inputTensor);
 
   // Use GPU buffer as input
   execution.setInputGPUBuffer(0, resultMatrixBuffer);
 
-  let outputTensor = new Float32Array(TENSOR_SIZE);
-  execution.setOutput(0, outputTensor);
+  // Use CPU buffer as output
+  // let outputTensor = new Float32Array(TENSOR_SIZE);
+  // execution.setOutput(0, outputTensor);
+
+  // Use GPU buffer as output
+  execution.setOutputGPUBuffer(0, gpuBufferSecondMatrix);
 
   let error = await execution.startCompute();
   console.log(error);
 
-  console.log(outputTensor);
+  // console.log(outputTensor);
+
+  await runMatrixAddByWebGPU(device, gpuBufferSecondMatrix);
+
 })();
