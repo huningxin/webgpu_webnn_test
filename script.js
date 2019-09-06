@@ -36,24 +36,8 @@ async function createNNModel() {
 
 (async () => {
   
+  // Create nn graph
   const model = await createNNModel();
-  const compilation = await model.createCompilation();
-  compilation.setPreference(nn.PREFER_SUSTAINED_SPEED);
-  await compilation.finish();
-
-  let execution = await compilation.createExecution();
-  let inputTensor = new Float32Array(TENSOR_SIZE);
-  inputTensor.fill(1);
-
-  execution.setInput(0, inputTensor);
-
-  let outputTensor = new Float32Array(TENSOR_SIZE);
-  execution.setOutput(0, outputTensor);
-
-  let error = await execution.startCompute();
-  console.log(error);
-
-  console.log(outputTensor);
 
   if (!navigator.gpu) {
     console.log("WebGPU is not supported. Enable chrome://flags/#enable-unsafe-webgpu flag.");
@@ -62,6 +46,12 @@ async function createNNModel() {
 
   const adapter = await navigator.gpu.requestAdapter();
   const device = await adapter.requestDevice();
+
+  // Compile nn graph
+  const compilation = await model.createCompilation();
+  compilation.setGPUDevice(device);
+  compilation.setPreference(nn.PREFER_SUSTAINED_SPEED);
+  await compilation.finish();
 
   // First Matrix
 
@@ -261,4 +251,23 @@ async function createNNModel() {
   // Read buffer.
   const arrayBuffer = await gpuReadBuffer.mapReadAsync();
   console.log(new Float32Array(arrayBuffer));
+
+  // Execute nn graph
+  let execution = await compilation.createExecution();
+
+  // Use CPU buffer as input
+  // let inputTensor = new Float32Array(TENSOR_SIZE);
+  // inputTensor.fill(1);
+  // execution.setInput(0, inputTensor);
+
+  // Use GPU buffer as input
+  execution.setInputGPUBuffer(0, resultMatrixBuffer);
+
+  let outputTensor = new Float32Array(TENSOR_SIZE);
+  execution.setOutput(0, outputTensor);
+
+  let error = await execution.startCompute();
+  console.log(error);
+
+  console.log(outputTensor);
 })();
