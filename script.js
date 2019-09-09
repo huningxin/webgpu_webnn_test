@@ -3,9 +3,9 @@ import glslangModule from 'https://unpkg.com/@webgpu/glslang/web/glslang.js';
 const TENSOR_DIMS = [2, 2];
 const TENSOR_SIZE = 4;
 
-async function createAndCompileNNGraph(device) {
-  const nn = navigator.ml.getNeuralNetworkContext();
+const nn = navigator.ml.getNeuralNetworkContext();
 
+async function createNNModel(device) {
   let operandIndex = 0;
   const TENSOR_DATA = [1, 1, 1, 1];
   const float32TensorType = {type: nn.TENSOR_FLOAT32, dimensions: TENSOR_DIMS};
@@ -32,11 +32,7 @@ async function createAndCompileNNGraph(device) {
   model.identifyInputsAndOutputs([input], [output]);
   await model.finish();
 
-  const compilation = await model.createCompilation();
-  compilation.setGPUDevice(device);
-  compilation.setPreference(nn.PREFER_SUSTAINED_SPEED);
-  await compilation.finish();
-  return await compilation.createExecution();
+  return model;
 }
 
 async function runMatrixAddByWebGPU(device, gpuBufferSecondMatrix) {
@@ -206,7 +202,12 @@ async function runMatrixAddByWebGPU(device, gpuBufferSecondMatrix) {
 
   // Read buffer.
   const arrayBuffer = await gpuReadBuffer.mapReadAsync();
-  console.log(new Float32Array(arrayBuffer));
+
+  const resultArray = new Float32Array(arrayBuffer);
+
+  console.log(resultArray);
+
+
 }
 
 async function runMatrixMultiplyByWebGPU(device) {
@@ -383,29 +384,31 @@ async function runMatrixMultiplyByWebGPU(device) {
   passEncoder.dispatch(shape[0], shape[0]);
   passEncoder.endPass();
 
-  // Get a GPU buffer for reading in an unmapped state.
-  const gpuReadBuffer = device.createBuffer({
-    size: resultMatrixBufferSize,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-  });
+  // // Get a GPU buffer for reading in an unmapped state.
+  // const gpuReadBuffer = device.createBuffer({
+  //   size: resultMatrixBufferSize,
+  //   usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+  // });
 
-  // Encode commands for copying buffer to buffer.
-  commandEncoder.copyBufferToBuffer(
-    resultMatrixBuffer /* source buffer */,
-    0 /* source offset */,
-    gpuReadBuffer /* destination buffer */,
-    0 /* destination offset */,
-    resultMatrixBufferSize /* size */
-  );
+  // // Encode commands for copying buffer to buffer.
+  // commandEncoder.copyBufferToBuffer(
+  //   resultMatrixBuffer /* source buffer */,
+  //   0 /* source offset */,
+  //   gpuReadBuffer /* destination buffer */,
+  //   0 /* destination offset */,
+  //   resultMatrixBufferSize /* size */
+  // );
 
   // Submit GPU commands.
   const gpuCommands = commandEncoder.finish();
   device.getQueue().submit([gpuCommands]);
+  const fence = device.getQueue().createFence();
+  device.getQueue().signal(fence, 1);
+  await fence.onCompletion(1);
 
-
-  // Read buffer.
-  const arrayBuffer = await gpuReadBuffer.mapReadAsync();
-  console.log(new Float32Array(arrayBuffer));
+  // // Read buffer.
+  // const arrayBuffer = await gpuReadBuffer.mapReadAsync();
+  // console.log(new Float32Array(arrayBuffer));
 
   return resultMatrixBuffer;
 }
@@ -421,36 +424,45 @@ async function runMatrixMultiplyByWebGPU(device) {
   const device = await adapter.requestDevice();
 
   // Create nn graph
-  const execution = await createAndCompileNNGraph(device);
+  const model = await createNNModel();
 
-  const gpuBufferSecondMatrixSize = Float32Array.BYTES_PER_ELEMENT * (TENSOR_SIZE);
-  const gpuBufferSecondMatrix = device.createBuffer({
-    size: gpuBufferSecondMatrixSize,
-    usage: GPUBufferUsage.STORAGE
-  });
+  const compilation = await model.createCompilation();
+  compilation.setGPUDevice(device);
+  compilation.setPreference(nn.PREFER_SUSTAINED_SPEED);
+  await compilation.finish();
+  const execution = await compilation.createExecution();
 
-  const resultMatrixBuffer = await runMatrixMultiplyByWebGPU(device);
+  //    WebGPU multiply
+  //          |
+  //   inputGPUBuffer (result of multiplication)
+  //          |
+  //     WebNN addition
+  //          |
+  //   outputGPUBuffer (result of addition)
+  //          |
+  //     WebGPU addition  
 
-  // Use CPU buffer as input
-  //let inputTensor = new Float32Array(TENSOR_SIZE);
-  //inputTensor.fill(1);
-  // execution.setInput(0, inputTensor);
+  for (let i = 0; i < 10; i++) {
+    const outputGPUBufferSize = Float32Array.BYTES_PER_ELEMENT * (TENSOR_SIZE);
+    const outputGPUBuffer = device.createBuffer({
+      size: outputGPUBufferSize,
+      usage: GPUBufferUsage.STORAGE
+    });
 
-  // Use GPU buffer as input
-  execution.setInputGPUBuffer(0, resultMatrixBuffer);
+    const inputGPUBuffer = await runMatrixMultiplyByWebGPU(device);
 
-  // Use CPU buffer as output
-  // let outputTensor = new Float32Array(TENSOR_SIZE);
-  // execution.setOutput(0, outputTensor);
+    // Use GPU buffer as input
+    execution.setInputGPUBuffer(0, inputGPUBuffer);
 
-  // Use GPU buffer as output
-  execution.setOutputGPUBuffer(0, gpuBufferSecondMatrix);
+    // Use GPU buffer as output
+    execution.setOutputGPUBuffer(0, outputGPUBuffer);
 
-  let error = await execution.startCompute();
-  console.log(error);
+    let error = await execution.startCompute();
+    console.log(`startCompute returns ${error}`);
 
-  // console.log(outputTensor);
+    await runMatrixAddByWebGPU(device, outputGPUBuffer);
+  }
 
-  await runMatrixAddByWebGPU(device, gpuBufferSecondMatrix);
+  alert('done');
 
 })();
