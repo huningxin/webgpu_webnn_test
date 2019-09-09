@@ -35,6 +35,7 @@ async function createNNModel(device) {
   return model;
 }
 
+let additionWebGPUCode = null;
 async function runMatrixAddByWebGPU(device, gpuBufferSecondMatrix) {
   // First Matrix
   const firstMatrix = new Float32Array([1, 2, 3, 4]);
@@ -155,7 +156,10 @@ async function runMatrixAddByWebGPU(device, gpuBufferSecondMatrix) {
 
   // Pipeline setup
 
-  const glslang = await glslangModule();
+  if (additionWebGPUCode == null) {
+    const glslang = await glslangModule();
+    additionWebGPUCode = glslang.compileGLSL(computeShaderCode, "compute");
+  }
   
   const computePipeline = device.createComputePipeline({
     layout: device.createPipelineLayout({
@@ -163,7 +167,7 @@ async function runMatrixAddByWebGPU(device, gpuBufferSecondMatrix) {
     }),
     computeStage: {
       module: device.createShaderModule({
-        code: glslang.compileGLSL(computeShaderCode, "compute")
+        code: additionWebGPUCode
       }),
       entryPoint: "main"
     }
@@ -205,11 +209,11 @@ async function runMatrixAddByWebGPU(device, gpuBufferSecondMatrix) {
 
   const resultArray = new Float32Array(arrayBuffer);
 
-  console.log(resultArray);
-
-
+  //console.log(resultArray);
+  return resultArray;
 }
 
+let multiplyWebGPUCode = null;
 async function runMatrixMultiplyByWebGPU(device) {
   // First Matrix
   const rows = 2;
@@ -359,7 +363,10 @@ async function runMatrixMultiplyByWebGPU(device) {
 
   // Pipeline setup
 
-  const glslang = await glslangModule();
+  if (multiplyWebGPUCode == null) {
+    const glslang = await glslangModule();
+    multiplyWebGPUCode = glslang.compileGLSL(computeShaderCode, "compute");
+  }
   
   const computePipeline = device.createComputePipeline({
     layout: device.createPipelineLayout({
@@ -367,7 +374,7 @@ async function runMatrixMultiplyByWebGPU(device) {
     }),
     computeStage: {
       module: device.createShaderModule({
-        code: glslang.compileGLSL(computeShaderCode, "compute")
+        code: multiplyWebGPUCode
       }),
       entryPoint: "main"
     }
@@ -442,7 +449,14 @@ async function runMatrixMultiplyByWebGPU(device) {
   //          |
   //     WebGPU addition  
 
-  for (let i = 0; i < 10; i++) {
+  const count = 100;
+  let startTime = performance.now();
+  for (let i = 0; i < count; i++) {
+    if (i == 1) {
+      let warmupTime = performance.now() - startTime;
+      console.log(`warmup time ${warmupTime}`);
+      startTime = performance.now();
+    }
     const outputGPUBufferSize = Float32Array.BYTES_PER_ELEMENT * (TENSOR_SIZE);
     const outputGPUBuffer = device.createBuffer({
       size: outputGPUBufferSize,
@@ -458,11 +472,14 @@ async function runMatrixMultiplyByWebGPU(device) {
     execution.setOutputGPUBuffer(0, outputGPUBuffer);
 
     let error = await execution.startCompute();
-    console.log(`startCompute returns ${error}`);
+    // console.log(`startCompute returns ${error}`);
 
-    await runMatrixAddByWebGPU(device, outputGPUBuffer);
+    let result = await runMatrixAddByWebGPU(device, outputGPUBuffer);
+    if (i == count - 1) {
+      console.log(`result: [${result}]`);
+    }
   }
-
-  alert('done');
+  let meanTime = (performance.now() - startTime)/(count - 1);
+  console.log(`mean time ${meanTime.toFixed(2)} ms`);
 
 })();
