@@ -391,31 +391,9 @@ async function runMatrixMultiplyByWebGPU(device) {
   passEncoder.dispatch(shape[0], shape[0]);
   passEncoder.endPass();
 
-  // // Get a GPU buffer for reading in an unmapped state.
-  // const gpuReadBuffer = device.createBuffer({
-  //   size: resultMatrixBufferSize,
-  //   usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-  // });
-
-  // // Encode commands for copying buffer to buffer.
-  // commandEncoder.copyBufferToBuffer(
-  //   resultMatrixBuffer /* source buffer */,
-  //   0 /* source offset */,
-  //   gpuReadBuffer /* destination buffer */,
-  //   0 /* destination offset */,
-  //   resultMatrixBufferSize /* size */
-  // );
-
   // Submit GPU commands.
   const gpuCommands = commandEncoder.finish();
   device.getQueue().submit([gpuCommands]);
-  const fence = device.getQueue().createFence();
-  device.getQueue().signal(fence, 1);
-  await fence.onCompletion(1);
-
-  // // Read buffer.
-  // const arrayBuffer = await gpuReadBuffer.mapReadAsync();
-  // console.log(new Float32Array(arrayBuffer));
 
   return resultMatrixBuffer;
 }
@@ -465,14 +443,13 @@ async function runMatrixMultiplyByWebGPU(device) {
 
     const inputGPUBuffer = await runMatrixMultiplyByWebGPU(device);
 
-    // Use GPU buffer as input
-    execution.setInputGPUBuffer(0, inputGPUBuffer);
-
-    // Use GPU buffer as output
-    execution.setOutputGPUBuffer(0, outputGPUBuffer);
-
-    let error = await execution.startCompute();
-    // console.log(`startCompute returns ${error}`);
+    // Execute nn graph by GPU command buffer
+    const commandEncoder = device.createCommandEncoder();
+    commandEncoder.setNnGraphInput(inputGPUBuffer, 0, execution);
+    commandEncoder.setNnGraphOutput(outputGPUBuffer, 0, execution);
+    commandEncoder.executeNnGraph(execution);
+    const gpuCommands = commandEncoder.finish();
+    device.getQueue().submit([gpuCommands]);
 
     let result = await runMatrixAddByWebGPU(device, outputGPUBuffer);
     if (i == count - 1) {
